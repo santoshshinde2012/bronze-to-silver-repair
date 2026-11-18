@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import re
+
 import pandas as pd
 
 from .models import RepairRequest, RowDiff
-from .protocols import Lake, StatusRule
+from .protocols import BronzeReader, GoldStore, SilverStore, StatusRule
 
 
 def build_silver(changes: pd.DataFrame, rule: StatusRule) -> pd.DataFrame:
@@ -36,55 +38,66 @@ def diff_rows(left: pd.DataFrame, right: pd.DataFrame, key: str = "order_id") ->
 class Medallion:
     """The daily job and the repair share `build_silver` and one rule."""
 
-    def __init__(self, lake: Lake) -> None:
-        self.lake = lake
+    def __init__(self, bronze: BronzeReader, silver: SilverStore, gold: GoldStore) -> None:
+        self.bronze = bronze
+        self.silver = silver
+        self.gold = gold
         self.processed_bronze_version = -1  # our stand-in for a checkpoint
 
     def first_load(self, rule: StatusRule) -> None:
-        version = self.lake.bronze_version()
-        silver = build_silver(self.lake.read_bronze(version), rule)
-        self.lake.overwrite_silver(silver)
-        self.lake.overwrite_gold(build_gold(silver))
+        version = self.bronze.bronze_version()
+        silver = build_silver(self.bronze.read_bronze(version), rule)
+        self.silver.overwrite_silver(silver)
+        self.gold.overwrite_gold(build_gold(silver))
         self.processed_bronze_version = version
 
     def daily_run(self, rule: StatusRule) -> int:
         """Process only orders with changes after the saved position. Returns orders touched."""
-        version = self.lake.bronze_version()
+        if self.processed_bronze_version < 0:
+            raise RuntimeError("Call first_load before daily_run to initialize the tables and checkpoint.")
+        version = self.bronze.bronze_version()
         if version == self.processed_bronze_version:
             return 0
-        everything = self.lake.read_bronze(version)
-        before = self.lake.read_bronze(self.processed_bronze_version)
+        everything = self.bronze.read_bronze(version)
+        before = self.bronze.read_bronze(self.processed_bronze_version)
         merged = everything.merge(before, how="left", indicator=True)
         new_keys = sorted(int(k) for k in merged[merged["_merge"] == "left_only"]["order_id"].unique())
+        if not new_keys:
+            self.processed_bronze_version = version
+            return 0
         seen = set(before["order_id"])
         rows = build_silver(everything[everything["order_id"].isin(new_keys)], rule)
         scope = f"order_id IN ({', '.join(map(str, new_keys))})"
         if set(new_keys) & seen:
-            self.lake.replace_silver(rows, scope)
+            self.silver.replace_silver(rows, scope)
         else:
-            self.lake.append_silver(rows)
-        self.lake.overwrite_gold(build_gold(self.lake.read_silver()))
+            self.silver.append_silver(rows)
+        self.gold.overwrite_gold(build_gold(self.silver.read_silver()))
         self.processed_bronze_version = version
         return len(new_keys)
 
     def repair_silver(self, request: RepairRequest, rule: StatusRule) -> int:
         """Rebuild from the pinned Bronze version and replace only the scope."""
-        rebuilt = build_silver(self.lake.read_bronze(request.bronze_version), rule)
+        rebuilt = build_silver(self.bronze.read_bronze(request.bronze_version), rule)
         in_scope = rebuilt.query(_to_pandas(request.scope))
-        return self.lake.replace_silver(in_scope, request.scope)
+        return self.silver.replace_silver(in_scope, request.scope)
 
     def repair_gold(self, dates: list[str]) -> int:
         """Recompute every group for the affected dates, so emptied groups disappear."""
-        silver = self.lake.read_silver()
+        if not dates:
+            raise ValueError("Gold repair requires at least one affected date.")
+        silver = self.silver.read_silver()
         groups = build_gold(silver[silver["order_date"].isin(dates)])
         scope = "order_date IN (" + ", ".join(f"'{d}'" for d in dates) + ")"
-        return self.lake.replace_gold(groups, scope)
+        return self.gold.replace_gold(groups, scope)
 
     def full_rebuild(self, bronze_version: int, rule: StatusRule) -> pd.DataFrame:
         """What Silver would be if we rebuilt everything from one Bronze version."""
-        return build_silver(self.lake.read_bronze(bronze_version), rule)
+        return build_silver(self.bronze.read_bronze(bronze_version), rule)
 
 
 def _to_pandas(scope: str) -> str:
     """Translate the small SQL predicates used here into a pandas query."""
-    return scope.replace(" AND ", " and ").replace(" IN ", " in ").replace("'", '"')
+    # Brackets keep a one-element IN clause list-like for pandas, too.
+    membership = re.sub(r"\bIN\s*\(([^()]*)\)", r"in [\1]", scope)
+    return membership.replace(" AND ", " and ").replace("'", '"')

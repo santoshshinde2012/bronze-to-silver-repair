@@ -34,3 +34,4 @@ class FeedSummary:
     deletes: int
     inserts: int
     changed_keys: tuple[int, ...]
+    affected_dates: tuple[str, ...] = ()

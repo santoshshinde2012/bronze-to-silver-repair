@@ -38,6 +38,7 @@ def test_data_that_arrived_after_the_pin_is_kept_once(result):
 
 
 def test_gold_is_wrong_until_its_own_repair_and_emptied_groups_disappear(result):
+    assert result["gold_repair_dates"] == ["2026-11-01", "2026-11-03", "2026-11-04"]
     assert result["gold_matches_silver_before"] is False
     assert result["gold_matches_silver_after"] is True
     assert "2026-11-01 shipped" not in result["gold_after_gold_repair"]

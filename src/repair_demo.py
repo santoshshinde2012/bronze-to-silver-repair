@@ -1,6 +1,6 @@
 """Composition root: run the repair on local Delta tables and print what happened.
 
-Run from the `code/` folder:  python -m src.repair_demo
+Run from the repository root: python -m src.repair_demo
 """
 
 from __future__ import annotations

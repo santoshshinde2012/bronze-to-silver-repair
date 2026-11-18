@@ -14,6 +14,16 @@ SILVER_COLUMNS = ["order_id", "order_date", "status"]
 GOLD_COLUMNS = ["order_date", "status", "orders"]
 
 
+def read_delta_snapshot(table: DeltaTable) -> pd.DataFrame:
+    """Read small local snapshots without Arrow's background scan/conversion pools.
+
+    Serial reads avoid an intermittent thread-pool shutdown hang observed in the
+    CLI with PyArrow 26.0.1. Related upstream report:
+    https://github.com/apache/arrow/issues/50482
+    """
+    return table.to_pyarrow_dataset().to_table(use_threads=False).to_pandas(use_threads=False)
+
+
 class DeltaLake:
     """Bronze, Silver and Gold as three Delta tables under one folder."""
 
@@ -31,11 +41,11 @@ class DeltaLake:
         return DeltaTable(self.bronze).version()
 
     def read_bronze(self, version: int | None = None) -> pd.DataFrame:
-        return DeltaTable(self.bronze, version=version).to_pandas()
+        return read_delta_snapshot(DeltaTable(self.bronze, version=version))
 
     # ---- Silver: one row per order, change feed enabled ------------
     def read_silver(self, version: int | None = None) -> pd.DataFrame:
-        frame = DeltaTable(self.silver, version=version).to_pandas()
+        frame = read_delta_snapshot(DeltaTable(self.silver, version=version))
         return frame[SILVER_COLUMNS].sort_values("order_id").reset_index(drop=True)
 
     def silver_version(self) -> int:
@@ -63,13 +73,25 @@ class DeltaLake:
         """Summarise the change feed of one Silver commit."""
         feed = pa.table(
             DeltaTable(self.silver).load_cdf(starting_version=version, ending_version=version).read_all()
-        ).to_pandas()
-        deletes = feed[feed["_change_type"] == "delete"].set_index("order_id")["status"]
-        inserts = feed[feed["_change_type"] == "insert"].set_index("order_id")["status"]
+        ).to_pandas(use_threads=False)
+        deletes = feed[feed["_change_type"].isin(["delete", "update_preimage"])].set_index("order_id")
+        inserts = feed[feed["_change_type"].isin(["insert", "update_postimage"])].set_index("order_id")
+        columns = [column for column in SILVER_COLUMNS if column != "order_id"]
         changed = sorted(
-            int(key) for key in set(deletes.index) | set(inserts.index) if deletes.get(key) != inserts.get(key)
+            int(key)
+            for key in set(deletes.index) | set(inserts.index)
+            if key not in deletes.index
+            or key not in inserts.index
+            or not deletes.loc[key, columns].equals(inserts.loc[key, columns])
         )
-        return FeedSummary(deletes=len(deletes), inserts=len(inserts), changed_keys=tuple(changed))
+        dates = set(deletes[deletes.index.isin(changed)]["order_date"])
+        dates.update(inserts[inserts.index.isin(changed)]["order_date"])
+        return FeedSummary(
+            deletes=len(deletes),
+            inserts=len(inserts),
+            changed_keys=tuple(changed),
+            affected_dates=tuple(sorted(dates)),
+        )
 
     def vacuum_silver_now(self) -> int:
         """Remove every data file the current Silver version no longer uses."""
@@ -78,7 +100,7 @@ class DeltaLake:
 
     # ---- Gold: order counts by date and status ---------------------
     def read_gold(self) -> pd.DataFrame:
-        frame = DeltaTable(self.gold).to_pandas()
+        frame = read_delta_snapshot(DeltaTable(self.gold))
         return frame[GOLD_COLUMNS].sort_values(["order_date", "status"]).reset_index(drop=True)
 
     def overwrite_gold(self, rows: pd.DataFrame) -> int:

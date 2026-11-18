@@ -26,6 +26,15 @@ def test_build_silver_keeps_the_latest_change_by_source_sequence() -> None:
     assert silver.set_index("order_id")["status"].to_dict() == {1: "canceled", 2: "shipped"}
 
 
+def test_status_rule_only_needs_the_status_operation() -> None:
+    class LowercaseRule:
+        def status(self, raw_status: str) -> str:
+            return raw_status.lower()
+
+    silver = build_silver(CHANGES, LowercaseRule())
+    assert silver.set_index("order_id")["status"].to_dict() == {1: "cancelled", 2: "shipped"}
+
+
 def test_build_gold_counts_orders_by_date_and_status() -> None:
     gold = build_gold(build_silver(CHANGES, CorrectedStatusRule()))
     assert gold.to_dict("records") == [

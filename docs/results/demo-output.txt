@@ -1,0 +1,16 @@
+..................................                                       [100%]
+34 passed in 2.21s
+deltalake 1.6.6 on local disk; not a Databricks runtime
+1. Bronze pinned at version 2. Silver with the bug: {1: 'shipped', 2: 'shipped', 3: 'shipped', 4: 'shipped', 5: 'shipped', 6: 'shipped', 7: 'shipped'}
+2. Rerun with the corrected rule touched 0 orders; the next run touched 1.
+   Silver afterwards: {1: 'shipped', 2: 'shipped', 3: 'shipped', 4: 'shipped', 5: 'shipped', 6: 'shipped', 7: 'shipped', 8: 'placed'}
+3. Date-range repair. Silver: {1: 'shipped', 2: 'canceled', 3: 'shipped', 4: 'shipped', 5: 'canceled', 6: 'shipped', 7: 'shipped', 8: 'placed'}
+   Change feed for that commit: {'deletes': 6, 'inserts': 6, 'changed': [2, 5]}
+4. Same repair again changed rows: False; Silver has 8 rows.
+5. Row outside the scope: refused (DeltaError)
+6. Date-range repair vs full rebuild: {'different': [7], 'missing': [], 'extra': []}
+7. Key repair. Change feed: {'deletes': 3, 'inserts': 3, 'changed': [7]}; matches full rebuild: True; rows for order 8: 1
+8. Gold before its repair matches Silver: False: {'2026-11-01 shipped': 1, '2026-11-03 shipped': 3, '2026-11-04 shipped': 2, '2026-11-05 shipped': 1, '2026-11-06 placed': 1}
+   Gold after its repair matches Silver: True: {'2026-11-01 canceled': 1, '2026-11-03 canceled': 1, '2026-11-03 shipped': 2, '2026-11-04 canceled': 1, '2026-11-04 shipped': 1, '2026-11-05 shipped': 1, '2026-11-06 placed': 1}
+9. Pre-repair Silver readable before vacuum: True; files removed: 3; readable after: False
+   Pinned Bronze version still readable at the end: 14 rows

@@ -13,7 +13,7 @@ from typing import Any
 
 import deltalake
 import pandas as pd
-from deltalake import DeltaTable
+from deltalake.exceptions import DeltaError
 
 from .models import FeedSummary, RepairRequest
 from .pipeline import Medallion, build_gold, diff_rows
@@ -32,7 +32,7 @@ def run(root: Path, seed_file: Path = SEED_FILE) -> dict[str, Any]:
         shutil.rmtree(root)
     seed = json.loads(seed_file.read_text(encoding="utf-8"))
     lake = DeltaLake(root)
-    job = Medallion(lake)
+    job = Medallion(lake, lake, lake)
     faulty, corrected = FaultyStatusRule(), CorrectedStatusRule()
     out: dict[str, Any] = {"deltalake": deltalake.__version__}
 
@@ -58,9 +58,10 @@ def run(root: Path, seed_file: Path = SEED_FILE) -> dict[str, Any]:
     feed = lake.silver_feed(v_first)
     out["feed_date_repair"] = _feed(feed)
 
-    # 4. Repeat the same repair. Then show what an append would do instead.
+    # 4. Repeat the same repair and compare every business column.
+    before_repeat = lake.read_silver()
     job.repair_silver(first, corrected)
-    out["repeat_changes_rows"] = not lake.read_silver().equals(_frame(out["silver_after_date_repair"], lake))
+    out["repeat_changes_rows"] = not lake.read_silver().equals(before_repeat)
     out["silver_rows_after_repeat"] = len(lake.read_silver())
 
     # 5. A row outside the scope is refused.
@@ -68,7 +69,7 @@ def run(root: Path, seed_file: Path = SEED_FILE) -> dict[str, Any]:
         outside = lake.read_silver().head(1).assign(order_id=99, order_date="2026-12-01")
         lake.replace_silver(outside, DATE_SCOPE)
         out["outside_row"] = "accepted"
-    except Exception as exc:  # the library raises its own DeltaError
+    except DeltaError as exc:
         out["outside_row"] = f"refused ({type(exc).__name__})"
 
     # 6. Compare with a full rebuild from the latest Bronze. This catches the missed order.
@@ -92,7 +93,9 @@ def run(root: Path, seed_file: Path = SEED_FILE) -> dict[str, Any]:
     expected_gold = build_gold(lake.read_silver())
     out["gold_before_gold_repair"] = _groups(lake.read_gold())
     out["gold_matches_silver_before"] = lake.read_gold().equals(expected_gold)
-    job.repair_gold(["2026-11-01", "2026-11-03", "2026-11-04"])
+    affected_dates = sorted(set(feed.affected_dates) | set(feed2.affected_dates))
+    out["gold_repair_dates"] = affected_dates
+    job.repair_gold(affected_dates)
     out["gold_after_gold_repair"] = _groups(lake.read_gold())
     out["gold_matches_silver_after"] = lake.read_gold().equals(expected_gold)
 
@@ -116,14 +119,9 @@ def _groups(gold: pd.DataFrame) -> dict[str, int]:
     return {f"{r.order_date} {r.status}": int(r.orders) for r in gold.itertuples()}
 
 
-def _frame(statuses: dict[int, str], lake: DeltaLake) -> pd.DataFrame:
-    current = lake.read_silver()
-    return current.assign(status=current["order_id"].map(statuses))
-
-
 def _readable(lake: DeltaLake, version: int) -> bool:
     try:
-        DeltaTable(lake.silver, version=version).to_pandas()
+        lake.read_silver(version)
         return True
-    except Exception:
+    except FileNotFoundError:
         return False
