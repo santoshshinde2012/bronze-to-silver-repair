@@ -200,3 +200,7 @@ Targets run dependency setup first. Once installed, tools can be invoked directl
 ## Data and licensing
 
 All example data is synthetic. See [the data guide](data/README.md) for the fields and seed timeline. No `LICENSE` file is included; the repository does not currently declare a reuse license.
+
+## Support
+
+[![Buy Me a Coffee](https://img.shields.io/badge/buymeacoffee-black?style=for-the-badge&logo=buymeacoffee&logoColor=white)](https://buymeacoffee.com/santoshshin)
